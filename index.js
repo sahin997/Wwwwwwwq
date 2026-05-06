@@ -28,11 +28,11 @@ const OWNER_ID = 7015071638;
 // 🔥 MULTI CHANNEL SYSTEM
 const CHANNEL_1 = -1002241385522;
 const CHANNEL_2 = -1003068363952;
-const CHANNEL_3 = -1002237430375;
+const CHANNEL_3 = -1002985131272;
 
 const CHANNEL_LINK_1 = "https://t.me/FoXyWs";
 const CHANNEL_LINK_2 = "https://t.me/FoXyMx2";
-const CHANNEL_LINK_3 = "https://t.me/FOXyChatSupport";
+const CHANNEL_LINK_3 = "https://t.me/FoXyMX4";
 
 //_______________________________________
 //setupMgv(bot, OWNER_ID, CHANNEL_ID);
