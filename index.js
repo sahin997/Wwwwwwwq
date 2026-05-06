@@ -1,14 +1,23 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason
+} from "@whiskeysockets/baileys";
+
 import qrcodeTerminal from "qrcode-terminal";
 import QRCode from "qrcode";
 import TelegramBot from "node-telegram-bot-api";
 import XLSX from "xlsx";
 import fs from "fs";
 import { parse } from "csv-parse/sync";
+import pino from "pino"; // ✅ v7 এ দরকার
+
 //_______________________________________
-//import { getMainKeyboard, handleButtons, showMenu, isButtonMessage } from "./Button.js";
-//import setupMgv from "./Mgv.js";
-//import setupBroadcast from "./Broadcast.js";
+import {
+  getMainKeyboard,
+  handleButtons,
+  showMenu,
+  isButtonMessage
+} from "./Button.js";
 //-----------------------------------------------------
 
 
