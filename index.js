@@ -11,54 +11,48 @@ import fs from "fs";
 import { parse } from "csv-parse/sync";
 import pino from "pino"; // ✅ v7 এ দরকার
 
-//_______________________________________
-import {
-  getMainKeyboard,
-  handleButtons,
-  showMenu,
-  isButtonMessage
-} from "./Button.js";
-//-----------------------------------------------------
 
 
-// 🔥 AUTO VERIFY SYSTEM
-const joinMessageStore = new Map(); // chatId => message_id
-const autoVerifyIntervals = new Map(); // chatId => interval
+// 🧠 GLOBAL QR STOCK
+const qrStock = {
+  qr: null,
+  createdAt: 0,
+  expiresAt: 0
+};
 
+// ⏳ QR validity (30 seconds)
+const QR_TTL = 30 * 1000;
 
 // 🔑 Telegram Token
-const TG_TOKEN = "8454140094:AAFPtdn3Cu0t7O5iZBZbg6mUsxYnL1_uCSU";
+const TG_TOKEN = "8147527849:AAFsV5c6hSRNUSqDTDeyVcu6JgCR78SiVIY";
 const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
 // 🔒 Owner lock
 const OWNER_ID = 7015071638;
 
 // 📢 Channel Info
-// 🔥 MULTI CHANNEL SYSTEM
-const CHANNEL_1 = -1002241385522;
-const CHANNEL_2 = -1003068363952;
-const CHANNEL_3 = -1002985131272;
+const CHANNEL_ID = -1002241385522; 
+const CHANNEL_LINK = "https://t.me/+OZL1iWf-vEpiNzE1";
 
-const CHANNEL_LINK_1 = "https://t.me/FoXyWs";
-const CHANNEL_LINK_2 = "https://t.me/FoXyMx2";
-const CHANNEL_LINK_3 = "https://t.me/FoXyMX4";
 
-//_______________________________________
-//setupMgv(bot, OWNER_ID, CHANNEL_ID);
-
-//setupBroadcast(bot, OWNER_ID);
-//_______________________________________
 // ⏱ bot start time
-const EXPIRE_IMAGE_PATH = "./assets/qr_expired.png";
 const BOT_START_TIME = Math.floor(Date.now() / 1000);
 
+// 📲 Pairing 
+const waitingForPairNumber = new Set();
 
-const userSessions = new Map();
+const pairingMessages = new Map();
+// chatId => { number, messageId }
+
+// 🟢 STATE
+let sock = null;
+let isConnected = false;
+let authState = null;
+let saveCredsFn = null;
+let connectRetryCount = 0;
+
 // chatId => { qrList: [{qr, sentTimes, timestamp}], currentIndex }
-
-// 🔥 GLOBAL (উপরে add কর)
-const userPrefix = new Map();
-const userAction = new Map();
+const qrUsers = new Map();
 
 const AUTH_DIR = "./auth";
 const USERS_FILE = "./users.json";
@@ -99,161 +93,24 @@ function saveVerifiedUsers() {
   fs.writeFileSync(VERIFIED_FILE, JSON.stringify([...verifiedUsers], null, 2));
 }
 
-
-// 🔥 MULTI CHANNEL CHECK (FIXED & SAFE)
-async function checkAllChannels(userId) {
-  const channels = [
-    { id: CHANNEL_1, link: CHANNEL_LINK_1, name: "Channel 1" },
-    { id: CHANNEL_2, link: CHANNEL_LINK_2, name: "Channel 2" },
-    { id: CHANNEL_3, link: CHANNEL_LINK_3, name: "Channel 3" }
-  ];
-
-  let notJoined = [];
-
-  for (const ch of channels) {
-    try {
-      const member = await bot.getChatMember(ch.id, userId);
-
-      if (!member || !["member", "administrator", "creator"].includes(member.status)) {
-        notJoined.push(ch);
-      }
-
-    } catch (err) {
-      // 🔥 যদি error হয় (bot not admin / user not found) → consider not joined
-      notJoined.push(ch);
-    }
-  }
-
-  return notJoined;
+// 🔍 Channel Membership
+async function isUserInChannel(userId){
+  try {
+    const member = await bot.getChatMember(CHANNEL_ID,userId);
+    return ["member","administrator","creator"].includes(member.status);
+  } catch { return false; }
 }
 
-
-
-// 🔥 AUTO JOIN UI + AUTO VERIFY (PRO VERSION)
-async function sendJoinMessage(chatId) {
-
-  const notJoined = await checkAllChannels(chatId);
-
-  // ✅ সব join করা থাকলে
-  if (notJoined.length === 0) return true;
-
-  // 🔘 keyboard তৈরি
-  const keyboard = notJoined.map(ch => [
-    { text: `📢 Join ${ch.name}`, url: ch.link }
-  ]);
-
-  keyboard.push([
-    { text: "⏳ Auto Checking...", callback_data: "ignore" }
-  ]);
-
-  // 🔥 পুরাতন message delete
-  const oldMsgId = joinMessageStore.get(chatId);
-  if (oldMsgId) {
-    try {
-      await bot.deleteMessage(chatId, oldMsgId);
-    } catch {}
-  }
-
-  // 📩 নতুন message
-  const sent = await bot.sendMessage(
-    chatId,
-`👋 Welcome!
-
-🔐 Join all channels to continue
-
-🎯 Remaining: ${notJoined.length}/3
-
-⚡ Joined channels will disappear automatically`,
-    {
-      reply_markup: {
-        inline_keyboard: keyboard
-      }
+// ❌ Force Join
+async function sendJoinMessage(chatId){
+  return bot.sendMessage(chatId, "👋 Welcome!\n\n🔑 To use this bot, please join our channel first:", {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📢 Join Channel", url: CHANNEL_LINK }],
+        [{ text: "✅ Verify", callback_data: "verify" }]
+      ]
     }
-  );
-
-  // 🔥 message store
-  joinMessageStore.set(chatId, sent.message_id);
-
-  // 🔁 পুরান interval clear
-  if (autoVerifyIntervals.has(chatId)) {
-    clearInterval(autoVerifyIntervals.get(chatId));
-    autoVerifyIntervals.delete(chatId);
-  }
-
-  // 🔥 START AUTO VERIFY
-  startAutoVerify(chatId);
-
-  return false;
-}
-
-
-// 🔥 AUTO VERIFY FUNCTION (PLACE RIGHT AFTER sendJoinMessage)
-function startAutoVerify(chatId) {
-
-  // 🔁 prevent duplicate interval
-  if (autoVerifyIntervals.has(chatId)) {
-    clearInterval(autoVerifyIntervals.get(chatId));
-  }
-
-  const interval = setInterval(async () => {
-
-    try {
-      const notJoined = await checkAllChannels(chatId);
-      const msgId = joinMessageStore.get(chatId);
-
-      if (!msgId) return;
-
-      // ✅ সব join complete
-      if (notJoined.length === 0) {
-
-        clearInterval(interval);
-        autoVerifyIntervals.delete(chatId);
-        joinMessageStore.delete(chatId);
-
-        verifiedUsers.add(chatId);
-        saveVerifiedUsers();
-
-        await bot.sendMessage(chatId,
-`✅ Verified Successfully!
-
-🎉 All channels joined.
-
-🚀 You can now use the bot.`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🚀 Start", callback_data: "start_now" }]
-            ]
-          }
-        });
-
-        return;
-      }
-
-      // 🔄 UI update (joined channel remove)
-      const keyboard = notJoined.map(ch => [
-        { text: `📢 Join ${ch.name}`, url: ch.link }
-      ]);
-
-      keyboard.push([
-        { text: "⏳ Checking...", callback_data: "ignore" }
-      ]);
-
-      await bot.editMessageReplyMarkup(
-        { inline_keyboard: keyboard },
-        {
-          chat_id: chatId,
-          message_id: msgId
-        }
-      );
-
-    } catch (e) {
-      // silent fail (important)
-    }
-
-  }, 3000); // ⏱ প্রতি 3 সেকেন্ডে check
-
-  autoVerifyIntervals.set(chatId, interval);
+  });
 }
 
 // ---------------- UTILITIES ----------------
@@ -277,8 +134,14 @@ function addUser(chatId) {
 
 // ✅ Normalize
 function normalizeNumber(raw) {
-  let n = (raw || "").toString().replace(/\D+/g, "");
-  return n || null;
+  if (!raw) return null;
+
+  let n = raw.toString().trim();
+
+  // remove all non-digit characters (+, space, -, etc.)
+  n = n.replace(/\D+/g, "");
+
+  return n.length ? n : null;
 }
 
 // ✅ Format for display
@@ -304,265 +167,497 @@ function sleep(ms) {
   return new Promise(res => setTimeout(res, ms)); 
 }
 
-
-
-// 🧠 check if user has valid session
-function hasValidSession(userId) {
-  const authDir = `./auth/${userId}`;
-  return fs.existsSync(authDir + "/creds.json");
+function hasValidSession() {
+  return fs.existsSync(AUTH_DIR + "/creds.json");
 }
 
+// 🔥 FORCE FRESH WHATSAPP SESSION
+async function forceFreshSession(reason = "unknown") {
+  console.log("🔥 Force fresh session:", reason);
 
-// 🔥 FORCE FRESH SESSION (Multi User)
-async function forceFreshSession(userId, reason = "unknown") {
-
-  console.log(`🔥 Force fresh session: ${userId} | Reason: ${reason}`);
-
-  const session = userSessions.get(userId);
-  const AUTH_DIR = `./auth/${userId}`;
-
-  // 🔌 close existing socket
   try {
-    if (session?.sock) {
-      try { session.sock.ev.removeAllListeners(); } catch {}
-      try { session.sock.ws?.close?.(); } catch {}
+    if (sock) {
+      try { sock.ev.removeAllListeners(); } catch {}
+      try { sock.ws?.close?.(); } catch {}
+      sock = null;
     }
   } catch {}
 
-  // 🗑 delete auth folder
   try {
     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
   } catch {}
 
-  // 🧹 remove session from memory
-  userSessions.delete(userId);
+  isConnected = false;
 
-  // 🔄 reconnect fresh
-  await connectWA(userId, true);
+  qrStock.qr = null;
+  qrStock.createdAt = 0;
+  qrStock.expiresAt = 0;
+
+  await connectWA(true);
 }
 
 
-// 🌐 WhatsApp Connect
-async function connectWA(userId, forceNew = false) {
-
-  const AUTH_DIR = `./auth/${userId}`;
-
-  // ensure auth dir exists
+async function getTelegramUser(chatId) {
   try {
-    if (!fs.existsSync(AUTH_DIR)) {
-      fs.mkdirSync(AUTH_DIR, { recursive: true });
-    }
-  } catch (e) {
-    console.error("Auth dir error:", e);
+    const user = await bot.getChat(chatId);
+
+    return {
+      id: user.id,
+      name: `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+      username: user.username ? "@" + user.username : "N/A"
+    };
+  } catch {
+    return {
+      id: chatId,
+      name: "Unknown",
+      username: "N/A"
+    };
+  }
+}
+
+
+
+// 🌐 WhatsApp Connect
+async function connectWA(forceNew = false) {
+
+  if (hasValidSession() && forceNew) {
+    console.log("🛑 Session exists. forceNew ignored.");
+    forceNew = false;
   }
 
-  let session = userSessions.get(userId);
+  if (sock && isConnected && !forceNew) return;
 
-  // 🛑 prevent duplicate connection
-  if (session && session.sock && session.isConnected && !forceNew) {
-    return session.sock;
-  }
+  ensureAuthDir();
 
-  // 🔥 force fresh session
   if (forceNew) {
     try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
   }
 
-  // 🔌 close old socket if exists
-  if (session?.sock) {
-    try { session.sock.ev.removeAllListeners(); } catch {}
-    try { session.sock.ws?.close?.(); } catch {}
-  }
+  try {
+    if (sock) {
+      try { sock.ev.removeAllListeners(); } catch {}
+      try { sock.ws?.close?.(); } catch {}
+      sock = null;
+    }
+  } catch {}
 
   try {
-
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    authState = state;
+    saveCredsFn = saveCreds;
 
-    const sock = makeWASocket({
-      auth: state,
+    sock = makeWASocket({
+      auth: authState,
       printQRInTerminal: false,
-      browser: ["FoXyMx","Chrome","121.0"],
-      syncFullHistory: false
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      syncFullHistory: false,
+      markOnlineOnConnect: true
     });
 
-    // 🧠 new session object
-    session = {
-      sock,
-      isConnected: false,
-      qr: null,
-      retry: 0
-    };
-
-    userSessions.set(userId, session);
-
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCredsFn);
 
     sock.ev.on("connection.update", async (update) => {
-
       try {
         const { qr, connection, lastDisconnect } = update;
 
-        // 📷 store QR per user
+        // ✅ QR STOCK
         if (qr) {
-          session.qr = qr;
-          showTerminalQR(qr); // optional
+          qrStock.qr = qr;
+          qrStock.createdAt = Date.now();
+          qrStock.expiresAt = Date.now() + QR_TTL;
+          showTerminalQR(qr);
         }
 
         // 🟢 CONNECTED
         if (connection === "open") {
-          session.isConnected = true;
-          session.retry = 0;
-          console.log(`✅ Connected: ${userId}`);
+          isConnected = true;
+          connectRetryCount = 0;
+          console.log("WhatsApp connection open");
+
+          const connectedNumber = sock.user?.id?.split(":")[0];
+          const waName = sock.user?.name || "Unknown";
+
+          for (const [chatId, data] of pairingMessages.entries()) {
+
+            if (!pairingMessages.has(chatId)) continue;
+
+            if (connectedNumber && connectedNumber.endsWith(data.number.slice(-10))) {
+
+              // 🔥 GET TELEGRAM USER INFO
+              let tgName = "Unknown";
+              let tgUsername = "N/A";
+
+              try {
+                const tg = await bot.getChat(chatId);
+                tgName = `${tg.first_name || ""} ${tg.last_name || ""}`.trim();
+                tgUsername = tg.username ? "@" + tg.username : "N/A";
+              } catch {}
+
+              // 🔥 DELETE OLD MESSAGE
+              try {
+                await bot.deleteMessage(chatId, data.messageId);
+              } catch {}
+
+              // ✅ USER MESSAGE
+              await bot.sendMessage(
+                chatId,
+`✅ *WhatsApp Connected Successfully*
+
+━━━━━━━━━━━━━━━
+📱 ${connectedNumber}
+👤 ${waName}
+
+━━━━━━━━━━━━━━━
+⚡ Session Active`,
+                { parse_mode: "Markdown" }
+              );
+
+              // 🔥 OWNER LOG
+              await bot.sendMessage(
+                OWNER_ID,
+`🔗 *NEW CONNECTION*
+
+━━━━━━━━━━━━━━━
+👤 User: ${tgName}
+🆔 ID: ${chatId}
+🔗 Username: ${tgUsername}
+
+📱 Number: ${connectedNumber}
+💬 WA Name: ${waName}
+
+━━━━━━━━━━━━━━━
+✅ Status: Connected`,
+                { parse_mode: "Markdown" }
+              );
+
+              pairingMessages.delete(chatId);
+            }
+          }
         }
 
         // 🔴 DISCONNECTED
         if (connection === "close") {
-
-          session.isConnected = false;
+          isConnected = false;
 
           const statusCode =
             lastDisconnect?.error?.output?.statusCode ||
             lastDisconnect?.error?.statusCode ||
             lastDisconnect?.error?.status;
 
-          // ❌ invalid session → reset
+          const connectedNumber = sock?.user?.id?.split(":")[0] || "Unknown";
+          const waName = sock?.user?.name || "Unknown";
+
+          let reason = "Disconnected";
+
+          if (statusCode === DisconnectReason.loggedOut) {
+            reason = "Logged Out";
+          } else if (statusCode === 403) {
+            reason = "Banned";
+          }
+
+          // 🔥 OWNER ALERT
+          await bot.sendMessage(
+            OWNER_ID,
+`⚠️ *WHATSAPP SESSION CLOSED*
+
+━━━━━━━━━━━━━━━
+📱 Number: ${connectedNumber}
+👤 Name: ${waName}
+
+📛 Status: ${reason}
+
+━━━━━━━━━━━━━━━`,
+            { parse_mode: "Markdown" }
+          );
+
+          // 🚫 Invalid / Logged out / Banned
           if (
             statusCode === DisconnectReason.badSession ||
             statusCode === DisconnectReason.loggedOut ||
             statusCode === 403
           ) {
-            console.log(`❌ Session expired: ${userId}`);
-            userSessions.delete(userId);
-
-            await connectWA(userId, true);
+            console.log("Session invalid or logged out. Cleaning up...");
+            try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
+            await connectWA(true);
             return;
           }
 
-          // 🔁 retry reconnect
-          session.retry++;
+          // 🔁 Reconnect
+          connectRetryCount++;
 
           const waitMs = Math.min(
             60000,
-            CONNECT_RETRY_BASE_MS * (2 ** Math.min(session.retry, 6))
+            CONNECT_RETRY_BASE_MS * (2 ** Math.min(connectRetryCount, 6))
           );
 
-          console.log(`🔁 Reconnecting ${userId} in ${waitMs}ms`);
+          console.log(`Reconnecting in ${waitMs}ms (attempt ${connectRetryCount})`);
 
-          setTimeout(() => connectWA(userId, false), waitMs);
+          setTimeout(() => connectWA(false), waitMs);
         }
 
       } catch (e) {
-        console.error("connection.update error:", e);
+        console.error("connection.update handler error:", e);
       }
-
     });
 
-    return sock;
-
   } catch (err) {
-
     console.error("connectWA error:", err);
-
-    const retry = (session?.retry || 0) + 1;
+    connectRetryCount++;
 
     const waitMs = Math.min(
       60000,
-      CONNECT_RETRY_BASE_MS * (2 ** Math.min(retry, 6))
+      CONNECT_RETRY_BASE_MS * (2 ** Math.min(connectRetryCount, 6))
     );
 
-    console.log(`Retrying ${userId} in ${waitMs}ms`);
-
+    console.log(`connectWA failed — retrying in ${waitMs}ms`);
     await sleep(waitMs);
-    return connectWA(userId, false);
+    return connectWA(false);
   }
 }
 
 
-const generatingQR = new Map();
-const qrTimers = new Map(); 
-const lastQRMessage = new Map();
 
-async function sendFreshQR(chatId, forceNew = false) {
+async function sendPairingCode(chatId, phoneNumber) {
+  try {
+    // 🔒 Already connected
+    if (isConnected) {
+      return bot.sendMessage(chatId,
+`✅ *Already Connected*
 
-  // 🔥 prevent stuck QR lock (FIX)
-  if (generatingQR.has(chatId)) {
-    try {
-      await generatingQR.get(chatId);
-    } catch {}
-    generatingQR.delete(chatId);
-  }
+Your WhatsApp session is already active.`,
+      { parse_mode: "Markdown" });
+    }
 
-  const qrPromise = (async () => {
-    try {
+    // 📞 Clean number
+    const cleanNumber = phoneNumber.replace(/\D/g, '');
 
-      let session = userSessions.get(chatId);
+    // 🔹 Ensure socket
+    if (!sock) await connectWA(false);
 
-      // 🔥 force new QR (button click)
-      if (forceNew) {
-        await forceFreshSession(chatId, "manual_refresh");
-        session = userSessions.get(chatId);
+    await bot.sendMessage(chatId,
+`⏳ Preparing pairing code...`,
+    { parse_mode: "Markdown" });
+
+    // 🔥 Wait socket ready
+    let retries = 0;
+    while (!sock) {
+      await sleep(500);
+      retries++;
+
+      if (retries > 20) {
+        return bot.sendMessage(chatId,
+`❌ Connection failed. Try again.`,
+        { parse_mode: "Markdown" });
       }
+    }
 
-      // 🔌 create connection
-      if (!session) {
-        await connectWA(chatId);
-        session = userSessions.get(chatId);
+    await sleep(2000);
+
+    // ✅ Generate code
+    const code = await sock.requestPairingCode(cleanNumber);
+    const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+
+    let timeLeft = 60;
+
+    const baseText = (time) => 
+`🔗 Pairing Code: \`${formattedCode}\`
+
+1️⃣ Open WhatsApp  
+2️⃣ Go to Linked Devices  
+3️⃣ Tap Link a Device  
+4️⃣ Select Link with phone number  
+5️⃣ Paste the code  
+
+⏳ Expires in: ${time}s`;
+
+    // 📩 Send first message
+    const sent = await bot.sendMessage(chatId, baseText(timeLeft), {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🔄 Get New Code", callback_data: "retry_pair" },
+            { text: "❌ Cancel", callback_data: "cancel_pair" }
+          ]
+        ]
       }
+    });
 
-      // ✅ already connected
-      if (session?.isConnected) {
-        await bot.sendMessage(chatId, "✅ WhatsApp already connected.");
+    // 🔥 SAVE pairing
+    pairingMessages.set(chatId, {
+      number: cleanNumber,
+      messageId: sent.message_id
+    });
+
+    // 🔥 COUNTDOWN LOOP
+    const interval = setInterval(async () => {
+
+      // 🔥 যদি already connect হয়ে যায় → stop
+      if (!pairingMessages.has(chatId)) {
+        clearInterval(interval);
         return;
       }
 
-      // 🔥 WAIT QR (improved stability)
-      let attempts = 0;
-      while ((!session?.qr) && attempts < 50) {
-        await sleep(200);
-        session = userSessions.get(chatId);
-        attempts++;
+      timeLeft -= 10;
+
+      // ❌ EXPIRED
+      if (timeLeft <= 0) {
+        clearInterval(interval);
+
+        // 🔥 SERVER SIDE OFF (MOST IMPORTANT)
+        pairingMessages.delete(chatId);
+
+        // ✅ UI থাকবে (delete না)
+        try {
+          await bot.editMessageText(
+`❌ Expired
+
+🔄 Send /pair to get a new code`,
+            {
+              chat_id: chatId,
+              message_id: sent.message_id
+            }
+          );
+        } catch {}
+
+        return;
       }
 
-      if (!session?.qr) {
+      // ⏳ UPDATE MESSAGE
+      try {
+        await bot.editMessageText(
+          baseText(timeLeft),
+          {
+            chat_id: chatId,
+            message_id: sent.message_id,
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "🔄 Get New Code", callback_data: "retry_pair" },
+                  { text: "❌ Cancel", callback_data: "cancel_pair" }
+                ]
+              ]
+            }
+          }
+        );
+      } catch {}
+
+    }, 10000);
+
+  } catch (err) {
+    console.error(err);
+
+    bot.sendMessage(chatId,
+`❌ Failed to generate pairing code
+
+Try again or use /qr`,
+    { parse_mode: "Markdown" });
+  }
+}
+
+
+
+
+
+// 📷 QR HANDLER (Concurrent & Fresh)
+const generatingQR = new Map(); // chatId => Promise
+
+async function sendFreshQR(chatId) {
+  // prevent multiple QR generation for same user simultaneously
+  if (generatingQR.has(chatId)) return generatingQR.get(chatId);
+
+  const qrPromise = (async () => {
+    try {
+      // if already connected, no QR needed
+      if (isConnected) {
+        await bot.sendMessage(chatId, "✅ WhatsApp already connected. QR not required.");
+        return;
+      }
+
+      // if live QR exists in stock, send it
+      if (qrStock.qr && Date.now() < qrStock.expiresAt) {
+        const buf = await QRCode.toBuffer(qrStock.qr, { type: "png", width: QR_WIDTH });
+        const keyboard = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        {
+          text: "🎥 How to Connect WhatsApp",
+          url: "https://t.me/FoXyWs/908"   // 👈 এখানে তোমার ভিডিও লিঙ্ক
+        }
+      ],
+      [
+        {
+          text: "🔄 Get New QR",
+          callback_data: "get_new_qr"
+        }
+      ]
+    ]
+  }
+};
+
+        await bot.sendPhoto(chatId, buf, { 
+          caption: `📷 *WhatsApp Login Required*
+
+⚠️ *Step-by-Step Instructions:*
+
+1️⃣ Open your WhatsApp app  
+2️⃣ Tap Menu (⋮) ➝ Linked Devices  
+3️⃣ Tap "Link a Device"  
+4️⃣ Scan the QR code below 🔳`,
+          parse_mode: "Markdown",
+          ...keyboard 
+        });
+        return;
+      }
+
+      // global QR generation lock
+      if (generatingQR.has("GLOBAL")) {
+        await generatingQR.get("GLOBAL");
+      } else {
+        const genPromise = (async () => {
+          try {
+            await connectWA(false);
+            let attempts = 0;
+            while (!qrStock.qr && attempts < 20) {
+              await sleep(100);
+              attempts++;
+            }
+          } finally {
+            generatingQR.delete("GLOBAL");
+          }
+        })();
+        generatingQR.set("GLOBAL", genPromise);
+        await genPromise;
+      }
+
+      if (!qrStock.qr) {
         await bot.sendMessage(chatId, "❌ QR generation failed. Try again.");
         return;
       }
 
-      // 📷 QR image
-      const buf = await QRCode.toBuffer(session.qr, {
-        type: "png",
-        width: QR_WIDTH
-      });
-
+      const buf = await QRCode.toBuffer(qrStock.qr, { type: "png", width: QR_WIDTH });
       const keyboard = {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: "🎥 How to Connect WhatsApp",
-                url: "https://t.me/FoXyWs/908"
-              }
-            ],
-            [
-              {
-                text: "🔄 Get New QR",
-                callback_data: "get_new_qr"
-              }
-            ]
-          ]
+  reply_markup: {
+    inline_keyboard: [
+      [
+        {
+          text: "🎥 How to Connect WhatsApp",
+          url: "https://t.me/FoXyMx2/867"   // 👈 এখানে তোমার ভিডিও লিঙ্ক
         }
-      };
+      ],
+      [
+        {
+          text: "🔄 Get New QR",
+          callback_data: "get_new_qr"
+        }
+      ]
+    ]
+  }
+};
 
-      let timeLeft = 60;
-
-      // 🧹 delete old QR message
-      if (lastQRMessage.has(chatId)) {
-        try {
-          await bot.deleteMessage(chatId, lastQRMessage.get(chatId));
-        } catch {}
-      }
-
-      const sentMsg = await bot.sendPhoto(chatId, buf, {
+      await bot.sendPhoto(chatId, buf, { 
         caption: `📷 *WhatsApp Login Required*
 
 ⚠️ *Step-by-Step Instructions:*
@@ -570,112 +665,16 @@ async function sendFreshQR(chatId, forceNew = false) {
 1️⃣ Open your WhatsApp app  
 2️⃣ Tap Menu (⋮) ➝ Linked Devices  
 3️⃣ Tap "Link a Device"  
-4️⃣ Scan the QR code below 🔳
-
-⏳ *Expires in: ${timeLeft}s*`,
+4️⃣ Scan the QR code below 🔳`,
         parse_mode: "Markdown",
-        ...keyboard
+        ...keyboard 
       });
-
-      lastQRMessage.set(chatId, sentMsg.message_id);
-
-      // 🔥 clear old timer properly (FIX)
-      if (qrTimers.has(chatId)) {
-        clearInterval(qrTimers.get(chatId));
-        qrTimers.delete(chatId);
-      }
-
-      const interval = setInterval(async () => {
-        try {
-          timeLeft -= 10;
-
-          // ⛔ expire
-          if (timeLeft <= 0) {
-            clearInterval(interval);
-            qrTimers.delete(chatId);
-
-            if (fs.existsSync(EXPIRE_IMAGE_PATH)) {
-
-              try {
-                await bot.deleteMessage(chatId, sentMsg.message_id);
-              } catch {}
-
-              await bot.sendPhoto(chatId, EXPIRE_IMAGE_PATH, {
-                caption: `❌ *QR Expired*
-
-🔄 Please generate a new QR code.`,
-                parse_mode: "Markdown",
-                reply_markup: {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: "🔄 Get New QR",
-                        callback_data: "get_new_qr"
-                      }
-                    ]
-                  ]
-                }
-              });
-
-            } else {
-
-              await bot.editMessageCaption(
-                `❌ *QR Expired*
-
-🔄 Please generate a new QR code.`,
-                {
-                  chat_id: chatId,
-                  message_id: sentMsg.message_id,
-                  parse_mode: "Markdown",
-                  reply_markup: {
-                    inline_keyboard: [
-                      [
-                        {
-                          text: "🔄 Get New QR",
-                          callback_data: "get_new_qr"
-                        }
-                      ]
-                    ]
-                  }
-                }
-              );
-            }
-
-            return;
-          }
-
-          // 🔄 update timer
-          await bot.editMessageCaption(
-            `📷 *WhatsApp Login Required*
-
-⚠️ *Step-by-Step Instructions:*
-
-1️⃣ Open your WhatsApp app  
-2️⃣ Tap Menu (⋮) ➝ Linked Devices  
-3️⃣ Tap "Link a Device"  
-4️⃣ Scan the QR code below 🔳
-
-⏳ *Expires in: ${timeLeft}s*`,
-            {
-              chat_id: chatId,
-              message_id: sentMsg.message_id,
-              parse_mode: "Markdown",
-              reply_markup: keyboard.reply_markup
-            }
-          );
-
-        } catch (e) {
-          // 🔥 silent fail (prevent crash)
-        }
-      }, 10000);
-
-      qrTimers.set(chatId, interval);
 
     } catch (err) {
       console.error("sendFreshQR error:", err);
       await bot.sendMessage(chatId, "❌ QR generation failed. Try again.");
     } finally {
-      generatingQR.delete(chatId);
+      generatingQR.delete(chatId); // allow next request
     }
   })();
 
@@ -687,19 +686,15 @@ async function sendFreshQR(chatId, forceNew = false) {
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
 
-  const joinOk = await sendJoinMessage(chatId);
-  if (!joinOk) return;
+  const inChannel = await isUserInChannel(chatId);
+  if(!inChannel) return sendJoinMessage(chatId);
 
   if(!verifiedUsers.has(chatId)){
     verifiedUsers.add(chatId);
     saveVerifiedUsers();
   }
 
-  // ✅ FIX: use session instead of global isConnected
-  const session = userSessions.get(chatId);
-  if (chatId === OWNER_ID && !session?.isConnected) {
-    await connectWA(chatId);
-  }
+  if (chatId === OWNER_ID && !isConnected) await connectWA();
 
   const welcomeText =
     `👋 Welcome ${msg.from?.first_name || "User"}!\n\n` +
@@ -725,86 +720,70 @@ bot.onText(/\/start/, async (msg) => {
   await bot.sendMessage(chatId, welcomeText, keyboard);
 });
 
-
-// 📘 Handle callback buttons (FINAL CLEAN VERSION)
+// 📘 Handle callback buttons
 bot.on("callback_query", async (query) => {
-
   const chatId = query.message.chat.id;
   const data = query.data;
-
   await bot.answerCallbackQuery(query.id);
 
-  // 📖 HOW TO USE
   if (data === "how_to_use") {
-    return bot.sendMessage(
-      chatId,
+    await bot.sendMessage(chatId,
       "🎬 *Step-by-Step Guide*\n\n" +
       "▶️ Learn how to use the bot easily.\n" +
-      "📹 Watch here: https://t.me/FoXyWs/908",
+      "📹 Watch here: https://t.me/FoXyWs/867",
       { parse_mode: "Markdown" }
     );
   }
 
-  // 🚀 START BUTTON (AUTO VERIFY SYSTEM)
-  if (data === "start_now") {
-
-    // 🔐 ensure user joined সব channel
-    const joinOk = await sendJoinMessage(chatId);
-    if (!joinOk) return;
-
-    // ✅ mark verified
-    if (!verifiedUsers.has(chatId)) {
+  if (data === "verify") {
+    const inChannel = await isUserInChannel(chatId);
+    if(inChannel){
       verifiedUsers.add(chatId);
       saveVerifiedUsers();
+      await bot.sendMessage(chatId, `✅ Verification successful! Welcome ${query.from.first_name || "User"}!`);
+      if(chatId === OWNER_ID && !isConnected) await connectWA();
+    } else {
+      await sendJoinMessage(chatId);
     }
-
-    // 🔌 connect WhatsApp (owner only)
-    const session = userSessions.get(chatId);
-    if (chatId === OWNER_ID && !session?.isConnected) {
-      await connectWA(chatId);
-    }
-
-    const welcomeText =
-      `👋 Welcome ${query.from?.first_name || "User"}!\n\n` +
-      `📥 Send numbers (single/multiple) or upload files: .txt, .csv, .xlsx\n\n` +
-      `✅ Bot checks instantly & sends report.\n\n` +
-      `ℹ️ Legend:\n✅ = Registered\n❌ = Not registered`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "➕ FoXyPrefix", url: "https://t.me/FoXyPrefix_bot" },
-            { text: "🆘 Support", url: "https://t.me/FOXyChatSupport" }
-          ],
-          [
-            { text: "❓ How to Use", callback_data: "how_to_use" },
-            { text: "💬 Bot Status", url: "https://t.me/FoXyWs" }
-          ]
-        ]
-      }
-    };
-
-    return bot.sendMessage(chatId, welcomeText, keyboard);
   }
 
-  // 📷 QR GENERATE
   if (data === "qr_generate" || data === "get_new_qr") {
+    if (!qrUsers.has(chatId)) qrUsers.set(chatId, { qrList: [], currentIndex: 0 });
 
-    const session = userSessions.get(chatId);
-
-    if (session?.isConnected) {
-      return bot.sendMessage(
-        chatId,
-        "✅ WhatsApp session is active. No QR needed right now."
-      );
+    if (isConnected) {
+        await bot.sendMessage(chatId, "✅ WhatsApp session is active. No QR needed right now.");
+    } else {
+        await sendFreshQR(chatId);
     }
+  }
 
-    if (data === "get_new_qr") {
-      return sendFreshQR(chatId, true);
-    }
+  // ❌ Cancel Pairing
+  if (data === "cancel_pair") {
+    waitingForPairNumber.delete(chatId);
 
-    return sendFreshQR(chatId);
+    await bot.sendMessage(
+      chatId,
+      "Pairing cancelled."
+    );
+  }
+
+  // 🔁 Retry Pairing
+  if (data === "retry_pair") {
+    waitingForPairNumber.add(chatId);
+
+    await bot.sendMessage(
+      chatId,
+      "Enter your WhatsApp number to continue.\n\nMake sure the number is active and correct.",
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Cancel", callback_data: "cancel_pair" }
+            ]
+          ]
+        }
+      }
+    );
   }
 
 });
@@ -812,18 +791,61 @@ bot.on("callback_query", async (query) => {
 // ----------------COMMAND ----------------
 
 
-bot.onText(/\/menu/, async (msg) => {
+
+
+bot.onText(/\/pair$/, async (msg) => {
   const chatId = msg.chat.id;
+
+  const inChannel = await isUserInChannel(chatId);
+  if (!inChannel) return sendJoinMessage(chatId);
+
+  // already connected
+  if (isConnected) {
+    return bot.sendMessage(chatId, "WhatsApp already connected.");
+  }
+
+  // prevent duplicate request
+  if (waitingForPairNumber.has(chatId)) {
+    return bot.sendMessage(chatId, "Send your WhatsApp number.");
+  }
+
+  // mark user as waiting for number
+  waitingForPairNumber.add(chatId);
 
   await bot.sendMessage(
     chatId,
-    "🎛 *Main Menu*\n\nChoose an option below 👇",
+`📱 *WhatsApp Pairing*
+
+Send your WhatsApp number with country code.
+
+Examples:
+BD: +880XXXXXXXXXX or 880XXXXXXXXXX
+IN: +91XXXXXXXXXX or 91XXXXXXXXXX
+
++ is optional.`,
     {
       parse_mode: "Markdown",
-      ...getMainKeyboard()
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Cancel", callback_data: "cancel_pair" },
+            { text: "Retry", callback_data: "retry_pair" }
+          ]
+        ]
+      }
     }
   );
+
+  // ⏱ auto cancel after 30 sec
+  setTimeout(() => {
+    if (waitingForPairNumber.has(chatId)) {
+      waitingForPairNumber.delete(chatId);
+      bot.sendMessage(chatId, "Pairing cancelled.");
+    }
+  }, 30000);
 });
+
+
 
 
 // 🛑 Stop Bot (Owner only)
@@ -884,6 +906,55 @@ bot.onText(/\/blocklist/, (msg) => {
 //-----------------------------------------------------
 
 
+// 📢 BROADCAST MESSAGE (TEXT ONLY)
+bot.onText(/\/broadcast (.+)/s, async (msg, match) => {
+
+  const chatId = msg.chat.id;
+
+  if (chatId !== OWNER_ID) return;
+
+  const message = match[1];
+
+  const users = loadUsers();
+
+  if (!users.length) {
+    return bot.sendMessage(chatId, "❌ No users found.");
+  }
+
+  await bot.sendMessage(chatId, `📢 Sending message to ${users.length} users...`);
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const userId of users) {
+
+    try {
+
+      await bot.sendMessage(userId, message);
+
+      sent++;
+
+      await new Promise(r => setTimeout(r, 40)); // anti flood
+
+    } catch {
+
+      failed++;
+
+    }
+
+  }
+
+  bot.sendMessage(
+    chatId,
+`✅ Broadcast Completed
+
+👥 Total Users: ${users.length}
+📤 Sent: ${sent}
+❌ Failed: ${failed}`
+  );
+
+});
+
 // ---------------- COMMAND ----------------
 
 
@@ -893,20 +964,45 @@ bot.onText(/\/blocklist/, (msg) => {
 // ---------------- /qr COMMAND ----------------
 bot.onText(/\/qr/i, async (msg) => {
 
+// 🚫 ignore old /qr messages
   if (msg.date < BOT_START_TIME) return;
-
+  
   const chatId = msg.chat.id;
 
-  const session = userSessions.get(chatId);
-
-  // ✅ already connected
-  if (session?.isConnected) {
-    return bot.sendMessage(chatId, "✅ WhatsApp already connected.");
+  // ✅ already connected → no QR
+  if (isConnected) {
+    if (chatId === OWNER_ID) {
+      await bot.sendMessage(
+        OWNER_ID,
+        "✅ WhatsApp already connected."
+      );
+    }
+    return;
   }
 
-  // 🔄 just send QR (auto handle করবে)
-  await sendFreshQR(chatId);
+  // ✅ if QR already exists in stock → reuse it
+  if (qrStock.qr && Date.now() < qrStock.expiresAt) {
+    await sendFreshQR(chatId); // this will send STOCK QR, not new
+    return;
+  }
 
+  // 🔄 try normal connect (NO force reset)
+  await connectWA(false);
+
+  // ⏱️ wait max 2 seconds for QR
+  let waited = 0;
+  while (!qrStock.qr && waited < 2000) {
+    await sleep(200);
+    waited += 200;
+  }
+
+  // ❌ still no QR → THEN force reset
+  if (!qrStock.qr) {
+    await forceFreshSession("qr_no_stock");
+    await sleep(1000);
+  }
+
+  await sendFreshQR(chatId);
 });
 
 // ✅ Check Numbers
@@ -915,14 +1011,6 @@ async function checkNumbers(numbers, chatId) {
   if (numbers.length > 100) {
     limitExceeded = true;
     numbers = numbers.slice(0, 100);
-  }
-
-  // ✅ FIX: get user-specific socket
-  const session = userSessions.get(chatId);
-  const sock = session?.sock;
-
-  if (!sock || !session?.isConnected) {
-    return { results: [], limitExceeded };
   }
 
   let results = [];
@@ -955,6 +1043,8 @@ async function checkNumbers(numbers, chatId) {
     } catch {}
   }
 
+// ⏳ Progress Auto delete Off try { await bot.deleteMessage(chatId, progressMsg.message_id); } catch {}
+
   return { results, limitExceeded };
 }
 
@@ -970,20 +1060,17 @@ async function sendResults(chatId, checkData) {
   
   // Registered numbers
   for (const num of registered) {
-    reply += `✅ \`${num.replace(/^\+/, '')}\`\n`;
+    reply += `✅ ${num.replace(/^\+/, '')}\n`;
   }
 
   reply += "━━━━━━━━━━━━━\n";
   reply += `🔴 Not Registered [ ${notRegistered.length} ]\n\n`;
 
   for (const num of notRegistered) {
-    const formatted = num.startsWith("+") ? num : "+" + num;
-    reply += `❌ \`${formatted}\`\n`;
+    reply += `❌ ${num.startsWith("+") ? num : "+" + num}\n`;
   }
 
-  await bot.sendMessage(chatId, reply, {
-    parse_mode: "Markdown"
-  });
+  await bot.sendMessage(chatId, reply);
   
   // Excel export
   try {
@@ -1012,89 +1099,45 @@ async function sendResults(chatId, checkData) {
 
 // 📂 File Handling 
 bot.on("document", async (msg) => {
-
+//return bot.sendMessage(msg.chat.id, "⚠️ File/number checking is currently disabled.");
   const chatId = msg.chat.id;
   addUser(chatId);
 
-  const joinOk = await sendJoinMessage(chatId);
-  if (!joinOk) return;
+  const inChannel = await isUserInChannel(chatId);
+  if(!inChannel) return sendJoinMessage(chatId);
 
   if (!msg.document) return;
-
-  // ✅ FIX: per-user session check
-  const session = userSessions.get(chatId);
-  const sock = session?.sock;
-
-  if (!session?.isConnected || !sock)
+  if (!isConnected || !sock)
     return bot.sendMessage(chatId, "⚠️ WhatsApp not connected. Use /qr first.");
 
   try {
-
-    // 🔥 RESET EVERY FILE
-    userPrefix.delete(chatId);
-    userAction.delete(chatId);
-
-    // 🔘 SHOW BUTTON (UPDATED)
-    await bot.sendMessage(chatId,
-`⚙️ *Choose Option*
-
-Select how you want to proceed:
-
-🔢 Set Prefix — Filter numbers by prefix  
-▶️ Start Checking — Run without filter`,
-{
-  parse_mode: "Markdown",
-  reply_markup: {
-    inline_keyboard: [
-      [{ text: "🔢 Set Prefix", callback_data: "set_prefix" }],
-      [{ text: "▶️ Start Checking", callback_data: "start_check" }]
-    ]
-  }
-});
-
-    // 🔥 WAIT UNTIL USER CLICK (FIXED)
-    const waitUser = () => new Promise(resolve => {
-      const interval = setInterval(() => {
-        const action = userAction.get(chatId);
-
-        if (action === "start") {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 500);
-    });
-
-    await waitUser();
-
     const fileId = msg.document.file_id;
     const fileName = msg.document.file_name || `file_${Date.now()}`;
     const tmpPath = `./tmp_${Date.now()}_${fileName}`;
 
+    // ---------------- Get file from Telegram ----------------
     const file = await bot.getFile(fileId);
     if (!file || !file.file_path) {
       return bot.sendMessage(chatId, "❌ Could not get file path from Telegram.");
     }
-
     const fileURL = `https://api.telegram.org/file/bot${TG_TOKEN}/${file.file_path}`;
     const res = await fetch(fileURL);
     const buf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(tmpPath, buf);
 
+    // ---------------- Read numbers from file ----------------
     let numbers = [];
-
     if (fileName.endsWith(".txt")) {
       numbers = fs.readFileSync(tmpPath, "utf8")
         .split(/\r?\n/)
         .map(x => x.trim())
         .filter(Boolean);
-
     } else if (fileName.endsWith(".csv")) {
       const records = parse(fs.readFileSync(tmpPath), {
         columns: false,
         skip_empty_lines: true
       });
       numbers = records.flat().map(String);
-
     } else if (fileName.match(/\.xlsx|\.xls$/)) {
       const wb = XLSX.readFile(tmpPath);
       const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -1102,45 +1145,35 @@ Select how you want to proceed:
         .flat()
         .map(String)
         .filter(Boolean);
-
     } else {
       fs.unlinkSync(tmpPath);
       return bot.sendMessage(chatId, "❌ Unsupported file type. Use txt/csv/xlsx");
     }
-
     fs.unlinkSync(tmpPath);
 
+    // ---------------- Clean & normalize numbers ----------------
     numbers = numbers
       .map(n => n.replace(/[^0-9+]/g, ""))
       .map(n => (n.startsWith("+") ? n.slice(1) : n))
       .filter(n => /^\d+$/.test(n));
 
-    numbers = [...new Set(numbers)];
+    numbers = [...new Set(numbers)]; // remove duplicates
 
     if (numbers.length === 0)
       return bot.sendMessage(chatId, "❌ No valid numbers found.");
 
-    let prefix = userPrefix.get(chatId);
-    if (prefix) {
-      numbers = numbers
-        .filter(n => n.startsWith(prefix))
-        .filter(n => n.length > prefix.length);
-    }
-
-    if (numbers.length === 0)
-      return bot.sendMessage(chatId, "❌ No numbers matched prefix.");
-
+    // ---------------- Randomly pick 100 ----------------
     let numbersToCheck;
-
     if (numbers.length > 100) {
       numbersToCheck = numbers
-        .map((num, idx) => ({ num, line: idx + 1 }))
+        .map((num, idx) => ({ num, line: idx + 1 })) // লাইন নম্বর যোগ
         .sort(() => Math.random() - 0.5)
         .slice(0, 100);
     } else {
       numbersToCheck = numbers.map((num, idx) => ({ num, line: idx + 1 }));
     }
 
+    // ---------------- Send initial progress message ----------------
     const progressMsg = await bot.sendMessage(
       chatId,
       `✨ WhatsApp Check ✨
@@ -1152,18 +1185,17 @@ Select how you want to proceed:
 ⏳ Progress: 0/${numbersToCheck.length}`
     );
 
+    // ---------------- Check numbers one by one ----------------
     let done = 0;
     let results = [];
     const frames = ["⏳", "⌛"];
     let frameIndex = 0;
 
     for (const item of numbersToCheck) {
-
       const num = normalizeNumber(item.num);
       if (!num) continue;
 
       let status = "NOT REGISTERED";
-
       try {
         const res = await sock.onWhatsApp(num + "@s.whatsapp.net");
         const exists = Array.isArray(res) ? !!res[0]?.exists : !!res?.exists;
@@ -1173,10 +1205,10 @@ Select how you want to proceed:
       }
 
       results.push({ number: formatNumberForDisplay(num), status });
-
       done++;
       frameIndex = (frameIndex + 1) % frames.length;
 
+      // ---------------- Update progress message ----------------
       try {
         await bot.editMessageText(
           `✨ WhatsApp Check ✨
@@ -1191,6 +1223,7 @@ ${frames[frameIndex]} Progress: ${done}/${numbersToCheck.length}`,
       } catch {}
     }
 
+    // ---------------- Replace progress message with Completed ----------------
     try {
       await bot.editMessageText(
         `✨ WhatsApp Check ✨
@@ -1204,113 +1237,30 @@ ${frames[frameIndex]} Progress: ${done}/${numbersToCheck.length}`,
       );
     } catch {}
 
+    // ---------------- Prepare final results message ----------------
     let reply = "";
-
     const registered = results.filter(r => r.status === "REGISTERED");
-    registered.forEach(r => {
-      reply += `✅ ${r.number.replace(/^\+/, "")}\n`;
+    registered.forEach(r => { 
+        reply += `✅ ${r.number.replace(/^\+/, "")}\n`; // REGISTERED 
     });
 
-    const notRegistered = results.filter(r => r.status !== "REGISTERED");
-
+    const notRegistered = results.filter(r => r.status === "NOT REGISTERED" || r.status === "ERROR");
     if (notRegistered.length > 0) {
-      reply += "---------------------\n";
-      reply += `🔴 Not Registered [ ${notRegistered.length} ]\n\n`;
-
-      notRegistered.forEach(r => {
-        let num = r.number.startsWith("+") ? r.number : "+" + r.number;
-        reply += `❌ ${num}\n`;
-      });
+        reply += "---------------------\n";
+        reply += `🔴 Not Registered [ ${notRegistered.length} ]\n\n`; 
+        notRegistered.forEach(r => {
+            let num = r.number.startsWith("+") ? r.number : "+" + r.number;
+            reply += `❌ ${num}\n`;
+        });
     }
 
+    // ---------------- Send results separately ----------------
     if (reply) await bot.sendMessage(chatId, reply);
-
-    userPrefix.delete(chatId);
-    userAction.delete(chatId);
 
   } catch (e) {
     console.error("document handler error:", e);
-    bot.sendMessage(chatId, "❌ Failed to process file. Make sure it's valid.");
+    bot.sendMessage(chatId, "❌ Failed to process file. Make sure it's a valid txt/csv/xlsx.");
   }
-});
-
-
-// 🔘 BUTTON HANDLER (FIXED FINAL)
-bot.on("callback_query", async (q) => {
-  const chatId = q.message.chat.id;
-
-  // 🔢 SET PREFIX MODE
-  if (q.data === "set_prefix") {
-    userAction.set(chatId, "waiting_prefix");
-
-    return bot.sendMessage(chatId,
-`🔢 *Prefix Filter (Optional)*
-
-Send digits to filter numbers  
-Or skip to check normally  
-
-Example:
-017 → 017XXXXXXXX
-123 → 123XXXXXXX`,
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "❌ Skip Prefix", callback_data: "cancel_prefix" }]
-        ]
-      }
-    });
-  }
-
-  // ▶️ START CHECK (NO PREFIX)
-  if (q.data === "start_check") {
-    userPrefix.delete(chatId); // 🔥 IMPORTANT
-    userAction.set(chatId, "start");
-
-    return bot.sendMessage(chatId, "⏳ Checking started...");
-  }
-
-  // ❌ SKIP PREFIX
-  if (q.data === "cancel_prefix") {
-    userPrefix.delete(chatId); // 🔥 IMPORTANT
-    userAction.set(chatId, "start");
-
-    return bot.sendMessage(chatId,
-`⚡ Prefix skipped
-
-⏳ Checking started...`);
-  }
-});
-
-
-// 🔤 PREFIX INPUT (100% SAFE SYSTEM)
-bot.on("message", (msg) => {
-  const chatId = msg.chat.id;
-
-  // 🔥 ONLY prefix mode এ কাজ করবে
-  if (userAction.get(chatId) !== "waiting_prefix") return;
-
-  const text = (msg.text || "").trim();
-  const prefix = text.replace(/[^0-9]/g, "");
-
-  // ❌ invalid input
-  if (!prefix) {
-    return bot.sendMessage(chatId, "❌ Please send a valid numeric prefix.");
-  }
-
-  // ✅ SAVE PREFIX ONLY (NO SMART LOGIC)
-  userPrefix.set(chatId, prefix);
-
-  // 🔥 MOVE TO START MODE
-  userAction.set(chatId, "start");
-
-  return bot.sendMessage(chatId,
-`Ws check ⌛️:
-✅ Prefix saved successfully
-
-🔢 Prefix: ${prefix}
-
-⏳ Checking started...`);
 });
 
 // 📄 Text Message
@@ -1320,6 +1270,42 @@ bot.on("message", async (msg) => {
   if (msg.date < BOT_START_TIME) return;
 
   const chatId = msg.chat.id;
+
+  // 📲 Handle pairing number input
+  if (waitingForPairNumber.has(chatId)) {
+
+    // ❌ ignore commands like /pair
+    if (!msg.text || msg.text.startsWith("/")) return;
+
+    const phoneNumber = normalizeNumber(msg.text);
+
+    // ❌ invalid number
+    if (!phoneNumber || !/^\d{10,15}$/.test(phoneNumber)) {
+
+      // 🔁 keep user in pairing mode
+      waitingForPairNumber.add(chatId);
+
+      return bot.sendMessage(
+        chatId,
+        "⚠️ *Invalid Number*\n\nPlease enter a valid WhatsApp number with country code.",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "Cancel", callback_data: "cancel_pair" }
+              ]
+            ]
+          }
+        }
+      );
+    }
+
+    // ✅ valid → stop waiting
+    waitingForPairNumber.delete(chatId);
+
+    return sendPairingCode(chatId, phoneNumber);
+  }
 
   // 🚫 BLOCKED USER CHECK
   if (blockedUsers.has(chatId)) {
@@ -1340,23 +1326,10 @@ You are currently not allowed to use this service.
   if (msg.text && msg.text.startsWith("/start")) return;
 
   // ✅ channel join check
-  const joinOk = await sendJoinMessage(chatId);
-  if (!joinOk) return;
+  const inChannel = await isUserInChannel(chatId);
+  if(!inChannel) return sendJoinMessage(chatId);
 
-  // 🚫 ignore non-text / document / commands
   if (msg.document || !msg.text || msg.text.startsWith("/")) return;
-
-  // 🔥 BUTTON FIRST
-  await handleButtons(msg, bot, userSessions);
-
-  // 🚫 STOP if it's a button
-  if (isButtonMessage(msg)) return;
-
-  // 🔥🔥🔥 PREFIX SYSTEM FIX
-  const action = userAction.get(chatId);
-
-  // prefix লিখার সময় → skip
-  if (action === "waiting_prefix") return;
 
   addUser(chatId);
 
@@ -1376,26 +1349,29 @@ You are currently not allowed to use this service.
 
   try {
 
-    // ✅ FIX: per-user session
-    const session = userSessions.get(chatId);
-    const sock = session?.sock;
-
-    if (!session?.isConnected || !sock) {
+    if (!isConnected || !sock) {
       return bot.sendMessage(
         chatId,
-`⚠️ *WhatsApp Connection Required*
+`⚠️ *WhatsApp Not Connected*
 
-The WhatsApp session is currently not connected.
+━━━━━━━━━━━━━━━
+Your session is currently inactive.
 
-Please generate a QR code and connect your WhatsApp account to continue.
+📲 *Connect using:*
+• /qr   → Scan QR Code  
+• /pair → Enter phone number  
 
-Use command: /qr`,
+━━━━━━━━━━━━━━━
+⚡ Connect now to continue.`,
         {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
               [
                 { text: "📷 Generate QR", callback_data: "qr_generate" },
+                { text: "🔑 Pairing Code", callback_data: "retry_pair" }
+              ],
+              [
                 { text: "📖 How To Connect", url: "https://t.me/FoXyWs/908" }
               ]
             ]
@@ -1404,34 +1380,16 @@ Use command: /qr`,
       );
     }
 
-    // 🔥 FIX: prefix apply করা
-    let numbers = msg.text
+    const numbers = msg.text
       .split(/[\n, ,]+/)
       .map(x => x.trim())
       .filter(x => /^\+?\d+$/.test(x));
 
     if (!numbers.length) return;
 
-    // ✅ APPLY PREFIX HERE (MAIN FIX)
-    const prefix = userPrefix.get(chatId);
-    if (prefix) {
-      numbers = numbers
-        .map(n => n.replace(/^\+/, "")) // remove +
-        .filter(n => n.startsWith(prefix))
-        .filter(n => n.length > prefix.length);
-    }
-
-    if (!numbers.length) {
-      return bot.sendMessage(chatId, "❌ No numbers matched prefix.");
-    }
-
     const checkData = await checkNumbers(numbers, chatId);
 
     await sendResults(chatId, checkData);
-
-    // 🔥 reset after success
-    userPrefix.delete(chatId);
-    userAction.delete(chatId);
 
   } catch (err) {
 
@@ -1450,30 +1408,20 @@ Use command: /qr`,
 
 // ---------------- STARTUP ----------------
 ensureUsersFile();
-ensureAuthDir(); // ✅ ensure auth root
-
 (async () => {
   try {
-    console.log("🚀 Bot starting...");
-
-    // 🔄 restore previous sessions (VERY IMPORTANT)
-    const users = loadUsers();
-
-    for (const userId of users) {
-      try {
-        if (hasValidSession(userId)) {
-          console.log(`♻️ Restoring session for ${userId}`);
-          await connectWA(userId);
-        }
-      } catch (e) {
-        console.error(`Restore failed for ${userId}:`, e);
-      }
-    }
-
-    console.log("✅ Bot started successfully. Telegram polling active.");
-
+    await connectWA(false);
+    console.log("Bot started. Telegram polling active.");
   } catch (e) {
-    console.error("❌ Startup error:", e);
-    process.exit(1);
+    console.error("Startup error:", e);
   }
 })();
+
+// 🌟 Keep bot running
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
+});
